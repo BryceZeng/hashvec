@@ -10,18 +10,18 @@ from functools import partial
 
 inputs = []
 targets = []
-test = pd.read_excel('CheckingAddress.xlsx')
+# test = pd.read_excel('CheckingAddress.xlsx')
+test = pd.read_excel('1103-1109.xlsx')
 seed = 500
 n = 200
 
 # Shuffle the data
-df = pd.DataFrame(test[['detail_list', 'check']]
-                  ).sample(frac=1.0)
+df = pd.DataFrame(test[['detail_list', 'check']])
 
 
 # Positive and negative indices of the original dataframe randomly sampled
-pos_inds = df[(df["check"] == 1)].sample(n=n, random_state=seed).index
-neg_inds = df[(df["check"] == 0)].sample(n=n, random_state=seed).index
+pos_inds = df[(df["check"] == 1)].index
+neg_inds = df[(df["check"] == 0)].index
 
 
 print(pos_inds.shape, neg_inds.shape)
@@ -31,7 +31,7 @@ neg_test_samples = df.loc[neg_inds]
 
 # Create the test dataset
 test_samples = pd.concat([pos_test_samples, neg_test_samples]).sample(
-    frac=1.0, random_state=seed)
+    100, random_state=seed)
 print(test_samples.shape)
 
 
@@ -53,12 +53,14 @@ print((1-(train_labels.value_counts()/train_labels.shape[0])).to_dict())
 
 
 # Define a count vectorizer that will create bag-of-words n-gram vectors
-count_vectorizer = CountVectorizer(analyzer='char', ngram_range=(1, 5))
+count_vectorizer = CountVectorizer(analyzer='char', ngram_range=(1, 7))
 # Fit the count vectorizer on the limited vocabulary to learn ngrams
 count_vectorizer.fit(words)
 
+max_seq_length = 8
 
-def get_transformed_input(inputs, count_vectorizer, max_seq_length=15):
+
+def get_transformed_input(inputs, count_vectorizer, max_seq_length=max_seq_length):
     """ Get the transformed input by adding empty spaces until the defined length is reached """
     for inp in inputs:
         inputs = []
@@ -154,7 +156,7 @@ class Hash2Vec(tf.keras.layers.Layer):
         self.R = self.add_weight(
             shape=(input_shape[-1], self.hash_bins//2),
             initializer='random_normal',
-            trainable=False
+            trainable=True
         )
 
     def call(self, x):
@@ -174,7 +176,7 @@ class Hash2Vec(tf.keras.layers.Layer):
         pass
 
 
-seq_length = 15
+seq_length = max_seq_length
 ngram_dim = len(count_vectorizer.get_feature_names_out())
 bins = 64
 
@@ -203,7 +205,7 @@ model = get_hash2vec_classifier(seq_length, ngram_dim, bins)
 model.summary()
 
 
-def train_and_test_model(model_func, train_x, train_y, test_x, test_y, n_trials=10):
+def train_and_test_model(model_func, train_x, train_y, test_x, test_y, n_trials=40):
     results = []
     for trial in range(n_trials):
         print("Training model for trial {}".format(trial))
@@ -216,8 +218,8 @@ def train_and_test_model(model_func, train_x, train_y, test_x, test_y, n_trials=
             train_y,
             class_weight=(1-(train_y.value_counts() /
                           train_y.shape[0])).to_dict(),
-            epochs=10,
-            batch_size=20,
+            epochs=100,
+            batch_size=100,
             verbose=0
         )
         trial_results["train_accuracy"] = history.history['accuracy']
