@@ -1,3 +1,5 @@
+import joblib
+import pickle
 import numpy as np
 import pandas as pd
 import tensorflow as tf
@@ -7,21 +9,59 @@ from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.manifold import TSNE
 from tensorflow.keras.preprocessing.text import Tokenizer
 from functools import partial
+import re
 
 inputs = []
 targets = []
 # test = pd.read_excel('CheckingAddress.xlsx')
-test = pd.read_excel('1103-1109.xlsx')
+# test = pd.read_excel('1103-1109.xlsx')
+train = pd.read_csv('train/negative.csv', encoding='latin1')
+train2 = pd.read_csv('train/artificial.csv', encoding='latin1')
+train = train.sample(500000)
+train = train.append(train2).reset_index(drop=True)
+del train2
+
+train2 = pd.read_csv('train/artificial_2.csv', encoding='latin1')
+train2['mark'] = '__label__positive'
+train = train.append(train2).reset_index(drop=True)
+del train2
+
+
+replaceword = {'djalan': 'jalan', 'jl': 'jalan', 'djl': 'jalan', 'dalan': 'jalan',
+               'jln': 'jalan', 'jn': 'jalan', 'gg': 'gang',
+               'g g': 'gang', 'blk': 'blok', 'block': 'blok',
+               'number': 'no'
+               }
+pattern = r'\b({})\b'.format(
+    '|'.join(sorted(re.escape(k) for k in replaceword)))
+
+
+def cleanString(string):
+    string = str(string).lower()
+    string = string.replace('\r', ' ').replace('\n', ' ')
+    string = re.sub(pattern, lambda m: replaceword.get(
+        m.group(0)), string, flags=re.IGNORECASE)
+    string = re.sub(r'[^\w\s]', ' ', string)
+    string = re.sub('\d+', '0', string)
+    string = re.sub('\s+', ' ', string)
+    return string
+
+
+train['detail_list'] = train.apply(
+    lambda row: cleanString(row['detail_list']), axis=1)
+
+
 seed = 500
 n = 200
 
+train['mark'] = np.where(train['mark'] == '__label__positive', 1, 0)
 # Shuffle the data
-df = pd.DataFrame(test[['detail_list', 'check']])
+df = pd.DataFrame(train[['detail_list', 'mark']])
 
 
 # Positive and negative indices of the original dataframe randomly sampled
-pos_inds = df[(df["check"] == 1)].index
-neg_inds = df[(df["check"] == 0)].index
+pos_inds = df[(df["mark"] == 1)].index
+neg_inds = df[(df["mark"] == 0)].index
 
 
 print(pos_inds.shape, neg_inds.shape)
@@ -31,20 +71,21 @@ neg_test_samples = df.loc[neg_inds]
 
 # Create the test dataset
 test_samples = pd.concat([pos_test_samples, neg_test_samples]).sample(
-    100, random_state=seed)
+    400, random_state=seed)
 print(test_samples.shape)
 
 
 # Separate inputs and targets
-test_inputs, test_labels = test_samples["detail_list"], test_samples["check"]
+test_inputs, test_labels = test_samples["detail_list"], test_samples["mark"]
 
 # Training data
 train_samples = df.loc[~df.index.isin(test_samples.index)]
-train_inputs, train_labels = train_samples["detail_list"], train_samples["check"]
+train_inputs, train_labels = train_samples["detail_list"].astype(
+    str), train_samples["mark"]
 
-assert test_labels.sum() + train_labels.sum() == df["check"].sum()
+# assert test_labels.sum() + train_labels.sum() == df["mark"].sum()
 # Get the most common 1000 words
-n_vocab = 1000
+n_vocab = 10000
 cnt = Counter(chain(*train_inputs.to_list()))
 words, _ = zip(*cnt.most_common(n_vocab))
 
@@ -53,7 +94,7 @@ print((1-(train_labels.value_counts()/train_labels.shape[0])).to_dict())
 
 
 # Define a count vectorizer that will create bag-of-words n-gram vectors
-count_vectorizer = CountVectorizer(analyzer='char', ngram_range=(1, 7))
+count_vectorizer = CountVectorizer(analyzer='char', ngram_range=(1, 8))
 # Fit the count vectorizer on the limited vocabulary to learn ngrams
 count_vectorizer.fit(words)
 
@@ -108,7 +149,7 @@ n_gram_count = len(feature_names)
 # print("Hash bins for the words are: {}".format(hash_bins))
 
 # Solving LSH for batches of data
-n_hashes = 8
+n_hashes = 100
 bins = 32
 R = np.random.normal(size=(n_gram_count, bins//2))
 
@@ -130,7 +171,7 @@ hash_vectors = hash_vectors / \
 
 # hash_vectors
 
-k = 5
+k = 120
 sort_ids = np.argsort(-np.dot(hash_vectors, hash_vectors.T), axis=-1)[:, 1:k+1]
 probe_ids = np.random.randint(30, size=10)
 for pid in probe_ids:
@@ -143,7 +184,7 @@ tf.keras.backend.clear_session()
 
 class Hash2Vec(tf.keras.layers.Layer):
 
-    def __init__(self, hash_bins):
+    def __init__(self, hash_bins, **kwargs):
         """ Initialize the random matrix """
         # A matrix of size [number of hashes, feature dim, number of bins]
         self.R = None
@@ -156,7 +197,8 @@ class Hash2Vec(tf.keras.layers.Layer):
         self.R = self.add_weight(
             shape=(input_shape[-1], self.hash_bins//2),
             initializer='random_normal',
-            trainable=True
+            trainable=True,
+            name='name'
         )
 
     def call(self, x):
@@ -172,8 +214,12 @@ class Hash2Vec(tf.keras.layers.Layer):
         return tf.math.l2_normalize(batch_concat_h_x, axis=-1)
 
     def get_config(self):
-        """ TODO """
-        pass
+        config = super().get_config().copy()
+        config.update({"context_size": self.context_size,
+                       "vocab_size": self.vocab_size,
+                       "embedding_size": self.embedding_size})
+        return config
+        # pass
 
 
 seq_length = max_seq_length
@@ -185,7 +231,8 @@ def get_hash2vec_classifier(seq_length, ngram_dim, bins):
     # Defining the model
 
     # Defining input layer
-    ngram_input = tf.keras.layers.Input(shape=(seq_length, ngram_dim))
+    ngram_input = tf.keras.layers.Input(
+        shape=(seq_length, ngram_dim), name='ngram_input')
     # Define the hash2vec layer
     hash2vec_out = Hash2Vec(bins)(ngram_input)
     # Define a layer to flatten the time dimension and create a long vector containing outputs of all steps
@@ -205,7 +252,7 @@ model = get_hash2vec_classifier(seq_length, ngram_dim, bins)
 model.summary()
 
 
-def train_and_test_model(model_func, train_x, train_y, test_x, test_y, n_trials=40):
+def train_and_test_model(model_func, train_x, train_y, test_x, test_y, n_trials=2):
     results = []
     for trial in range(n_trials):
         print("Training model for trial {}".format(trial))
@@ -219,7 +266,7 @@ def train_and_test_model(model_func, train_x, train_y, test_x, test_y, n_trials=
             class_weight=(1-(train_y.value_counts() /
                           train_y.shape[0])).to_dict(),
             epochs=100,
-            batch_size=100,
+            batch_size=1000,
             verbose=0
         )
         trial_results["train_accuracy"] = history.history['accuracy']
@@ -242,9 +289,28 @@ model, hash2vec_results = train_and_test_model(
 
 test_samples['predict'] = model.predict(test_transformed_input)
 
+################################################################
+with open('hash2vecVectorizer', 'wb') as fout:
+    pickle.dump((count_vectorizer), fout)
+
+model.save('hash2vec.h5')
+joblib.dump(model, 'hash2vecModel')
+
+################################################################
+######################     Load model    #######################
+################################################################
+with open('hash2vecVectorizer', 'rb') as f:
+    vector_1 = pickle.load(f)
+
+with open('hash2vecModel.pkl', 'rb') as f:
+    model_1 = pickle.load(f)
+
+model_1.predict(test_transformed_input)
 
 ################################################################
 # comparing to BOW
+
+
 def get_bag_of_ngrams_classifier():
 
     tf.keras.backend.clear_session()
@@ -285,3 +351,5 @@ print("Bag-of-ngrams: {} (mean) / {} (std)".format(
     np.array(bon_test_accuracies).mean(),
     np.array(bon_test_accuracies).std()
 ))
+
+test = pd.read_csv('test/1111订单 - 全天.csv', encoding='utf_8_sig')
